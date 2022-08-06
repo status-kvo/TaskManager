@@ -3,7 +3,7 @@
 interface
 
 uses
-  Winapi.Windows, {$IFDEF FPC} jwaTlHelp32{$ELSE} Winapi.TlHelp32{$ENDIF}, Winapi.ShellAPI,
+  Winapi.Windows, {$IFDEF FPC} jwaTlHelp32{$ELSE} Winapi.TlHelp32{$ENDIF}, //Winapi.ShellAPI,
   System.SysUtils, System.StrUtils, System.Classes,
   Vcl.Graphics,
   WinFileInfo;
@@ -16,6 +16,7 @@ type
 
   RecProcessEntry = record
     ProcessID:      UInt32;
+    ParentID :      UInt32;
     ProcessBits:    TProcessBits;
     ProcessName:    String;
     ProcessPath:    String;
@@ -23,31 +24,29 @@ type
     CompanyName:    String;
     Icon:           TBitmap;
     LimitedAccess:  Boolean;
+    Hash:           NativeInt;
    public
-     function BitsToString: String;
+    function BitsToString: String;
+    procedure HashCalc;
   end;
 
-type
-  IProcessList = interface
-
-    function GetProcessCount: NativeInt;
-    function GetProcess(Index: NativeInt): RecProcessEntry;
-
-    function IndexOfByName(const ProcessName: String): NativeInt; overload;
-    function IndexOfByPID(const ProcessID: UInt32): NativeInt; overload;
-
-    property Processes[Index: NativeInt]: RecProcessEntry read GetProcess; default;
-    property ProcessCount: NativeInt read GetProcessCount;
-  end;
-
-function GetProcessList(const AIconBackground: TColor = clWhite): IProcessList;
-
-implementation
-
-function GetProcessImageFileName(hProcess: THandle; lpImageFileName: LPTSTR; nSize: DWORD): DWORD; stdcall; external 'PSAPI.dll' name 'GetProcessImageFileNameW';
+//type
+//  IProcessList = interface
+//    ['{2E59A551-4A0E-4936-9BC0-558E8B6D0D39}']
+//
+//    function GetProcessCount: NativeInt;
+//    function GetProcess(Index: NativeInt): RecProcessEntry;
+//
+//    function IndexOfByName(const ProcessName: String): NativeInt; overload;
+//    function IndexOfByPID(const ProcessID: UInt32): NativeInt; overload;
+//
+//    property Processes[Index: NativeInt]: RecProcessEntry read GetProcess; default;
+//    property ProcessCount: NativeInt read GetProcessCount;
+//  end;
 
 type
   ArrProcessList = array of RecProcessEntry;
+  ArrProcessListPtr = array of ^RecProcessEntry;
 
 type
   TDeviceEntry = record
@@ -63,7 +62,7 @@ type
   TWow64RevertWow64FsRedirection = function(AOldValue: Pointer): BOOL; stdcall;
 
 type
-  TInnerProcessList = class(TInterfacedObject, IProcessList)
+  TProcessList = class(TObject)
    private
     class var FRunningInWin64: Boolean;
    private
@@ -92,8 +91,13 @@ type
     // IProcessList
     function GetProcessCount: NativeInt;
     function GetProcess(AIndex: NativeInt): RecProcessEntry;
+    function GetProcessByParentPID(AProcessID: UInt32): ArrProcessListPtr;
+
     function IndexOfByName(const AProcessName: String): NativeInt; overload; virtual;
     function IndexOfByPID(const AProcessID: UInt32): NativeInt; overload; virtual;
+
+    property Processes[Index: NativeInt]: RecProcessEntry read GetProcess; default;
+    property ProcessCount: NativeInt read GetProcessCount;
    public
     constructor Create(const AIconBackground: TColor);
     procedure AfterConstruction; override;
@@ -103,10 +107,9 @@ type
     class destructor Destroy;
   end;
 
-function GetProcessList(const AIconBackground: TColor): IProcessList;
-begin
-  Result := TInnerProcessList.Create(AIconBackground)
-end;
+implementation
+
+function GetProcessImageFileName(hProcess: THandle; lpImageFileName: LPTSTR; nSize: DWORD): DWORD; stdcall; external 'PSAPI.dll' name 'GetProcessImageFileNameW';
 
 { RecProcessEntry }
 
@@ -125,15 +128,14 @@ end;
 const
   PROCESS_QUERY_LIMITED_INFORMATION = $00001000;
 
-
 { TInnerProcessList }
 
-procedure TInnerProcessList.AfterConstruction;
+procedure TProcessList.AfterConstruction;
 begin
   InnerEnumerate;
 end;
 
-constructor TInnerProcessList.Create(const AIconBackground: TColor);
+constructor TProcessList.Create(const AIconBackground: TColor);
 begin
   inherited Create;
 
@@ -142,7 +144,7 @@ begin
   SetLength(FDevices,0);
 end;
 
-class constructor TInnerProcessList.Create;
+class constructor TProcessList.Create;
  var
   LModuleHandle: THandle;
 begin
@@ -170,14 +172,14 @@ begin
   end;
 end;
 
-class destructor TInnerProcessList.Destroy;
+class destructor TProcessList.Destroy;
 begin
   FWoW64RedirectValue := nil;
   FDisableWoW64RedirectProc := nil;
   FRevertWoW64RedirectProc := nil;
 end;
 
-function TInnerProcessList.DisableWoW64Redirection: Boolean;
+function TProcessList.DisableWoW64Redirection: Boolean;
 begin
   Result := False;
   if (@FDisableWoW64RedirectProc <> nil) then
@@ -185,7 +187,7 @@ begin
       Result := FDisableWoW64RedirectProc(@FWoW64RedirectValue)
 end;
 
-function TInnerProcessList.EnableWoW64Redirection: Boolean;
+function TProcessList.EnableWoW64Redirection: Boolean;
 begin
   Result := False;
   if (@FDisableWoW64RedirectProc <> nil) then
@@ -193,18 +195,18 @@ begin
       Result := FRevertWoW64RedirectProc(FWoW64RedirectValue)
 end;
 
-destructor TInnerProcessList.Destroy;
+destructor TProcessList.Destroy;
 begin
   InnerClear;
   inherited;
 end;
 
-function TInnerProcessList.GetProcessCount: NativeInt;
+function TProcessList.GetProcessCount: NativeInt;
 begin
   Result := Length(FProcesses)
 end;
 
-function TInnerProcessList.GetProcess(AIndex: NativeInt): RecProcessEntry;
+function TProcessList.GetProcess(AIndex: NativeInt): RecProcessEntry;
 begin
   if (AIndex >= Low(FProcesses)) and (AIndex <= High(FProcesses)) then
     Result := FProcesses[AIndex]
@@ -212,7 +214,17 @@ begin
     raise Exception.CreateFmt('TProcessList.GetProcess: Index (%d) out of bounds.', [AIndex]);
 end;
 
-function TInnerProcessList.IndexOfByName(const AProcessName: String): NativeInt;
+function TProcessList.GetProcessByParentPID(AProcessID: UInt32): ArrProcessListPtr;
+ var
+  LIndex:  NativeInt;
+begin
+  Result := [];
+  for LIndex := Low(FProcesses) to High(FProcesses) do
+    if FProcesses[LIndex].ParentID = AProcessID then
+      Result := Result + [@FProcesses[LIndex]]
+end;
+
+function TProcessList.IndexOfByName(const AProcessName: String): NativeInt;
  var
   LIndex:  NativeInt;
 begin
@@ -222,7 +234,7 @@ begin
   Result := -1;
 end;
 
-function TInnerProcessList.IndexOfByPID(const AProcessID: UInt32): NativeInt;
+function TProcessList.IndexOfByPID(const AProcessID: UInt32): NativeInt;
  var
   LIndex:  NativeInt;
 begin
@@ -232,7 +244,7 @@ begin
   Result := -1;
 end;
 
-procedure TInnerProcessList.InnerClear;
+procedure TProcessList.InnerClear;
  var
   LIndex: NativeInt;
 begin
@@ -242,7 +254,7 @@ begin
   SetLength(FDevices,0);
 end;
 
-procedure TInnerProcessList.InnerEnumerate;
+procedure TProcessList.InnerEnumerate;
 begin
   DisableWoW64Redirection;
   try
@@ -253,7 +265,7 @@ begin
   end;
 end;
 
-procedure TInnerProcessList.InnerEnumerateDevices;
+procedure TProcessList.InnerEnumerateDevices;
  type
   ArrString = array of String;
  var
@@ -311,7 +323,7 @@ begin
       end;
 end;
 
-procedure TInnerProcessList.InnerEnumerateProcess;
+procedure TProcessList.InnerEnumerateProcess;
  var
   LSnapshotHandle: THandle;
   LProcessEntry32: TProcessEntry32;
@@ -325,6 +337,7 @@ begin
           SetLength(FProcesses,Length(FProcesses) + 1);
           FProcesses[High(FProcesses)].ProcessName := StrPas(LProcessEntry32.szExeFile);
           FProcesses[High(FProcesses)].ProcessID := LProcessEntry32.th32ProcessID;
+          FProcesses[High(FProcesses)].ParentID := LProcessEntry32.th32ParentProcessID;
           InnerGetProcessImageInfo(FProcesses[High(FProcesses)]);
         until not Process32Next(LSnapshotHandle,LProcessEntry32);
     finally
@@ -332,39 +345,54 @@ begin
     end;
 end;
 
-function TInnerProcessList.InnerExtractIcon(const AFileName: String): TBitmap;
+type
+  ThIconArray = array[0..0] of hIcon;
+type
+  PhIconArray = ^ThIconArray;
+
+function ExtractIconEx(lpszFile: PWideChar; nIconIndex: Integer;
+  phiconLarge: PhIconArray; phiconSmall: PhIconArray; nIcons: UINT): UINT; stdcall; external 'shell32.dll' name 'ExtractIconExW';
+
+function TProcessList.InnerExtractIcon(const AFileName: String): TBitmap;
  var
-  LIcon: HICON;
-  LLarge: HICON;
+  LSmall: phIconArray;
+  LNumIcons: UINT;
+  TheIcon: TIcon;
 begin
   Result := nil;
 
-  if (ExtractIconExW(PChar(AFileName), 0, LLarge, LIcon, 1) <> 1) then
+  if AFileName = '' then
     Exit;
 
-  if (LIcon = 0) then
-    Exit;
-
-  try
-    Result := TBitmap.Create;
-    Result.Canvas.Lock;
+  LNumIcons := ExtractIconEx(PChar(AFileName), -1, nil, nil, 0);
+  if LNumIcons > 0 then
+  begin
+    LNumIcons := 1;
+    //GetMem(LLarge, LNumIcons * sizeof(hIcon));
+    GetMem(LSmall, LNumIcons * sizeof(hIcon));
     try
-      Result.Width := GetSystemMetrics(SM_CXSMICON);
-      Result.Height := GetSystemMetrics(SM_CYSMICON);
-      Result.Canvas.Brush.Color := FIconBackground;
-      Result.Canvas.Brush.Style := bsSolid;
-      Result.Canvas.FillRect(Rect(0,0,Result.Width,Result.Height));
-      if not DrawIconEx(Result.Canvas.Handle, 0, 0, LIcon, Result.Width, Result.Height, 0, 0, DI_NORMAL) then
-        FreeAndNil(Result);
+      //FillChar(LLarge^, LNumIcons * sizeof(hIcon), #0);
+      FillChar(LSmall^, LNumIcons * sizeof(hIcon), #0);
+      ExtractIconEx(PChar(AFileName), 0, nil, LSmall, LNumIcons);
+      //for i := 0 to (LNumIcons - 1) do
+      //begin
+        TheIcon := TIcon.Create;
+        try
+          TheIcon.Handle := LSmall^[0];
+          Result := TBitmap.Create(TheIcon.Width, TheIcon.Height);
+          Result.Canvas.Draw(0, 0, TheIcon);
+        finally
+          TheIcon.Free;
+        end;
+      //end;
     finally
-      Result.Canvas.Unlock;
+      //FreeMem(LLarge, LNumIcons * sizeof(hIcon));
+      FreeMem(LSmall, LNumIcons * sizeof(hIcon));
     end;
-  except
-    FreeAndNil(Result);
   end;
 end;
 
-function TInnerProcessList.InnerGetProcessBits(AProcessHandle: THandle): TProcessBits;
+function TProcessList.InnerGetProcessBits(AProcessHandle: THandle): TProcessBits;
  var
   LResultValue: BOOL;
 begin
@@ -379,7 +407,7 @@ begin
     Result := pbUnknown;
 end;
 
-procedure TInnerProcessList.InnerGetProcessImageInfo(var AProcessEntry: RecProcessEntry);
+procedure TProcessList.InnerGetProcessImageInfo(var AProcessEntry: RecProcessEntry);
 var
   LHandle: THandle;
   LIndex, LInfoIndex: NativeInt;
@@ -390,7 +418,7 @@ begin
   else
     LHandle := OpenProcess(PROCESS_QUERY_INFORMATION, False, AProcessEntry.ProcessID);
 
-  If LHandle <> 0 then
+  if LHandle <> 0 then
     try
       AProcessEntry.ProcessBits := InnerGetProcessBits(LHandle);
       AProcessEntry.ProcessPath := InnerGetProcessPath(LHandle);
@@ -417,9 +445,10 @@ begin
     end
   else
     AProcessEntry.LimitedAccess := True;
+  AProcessEntry.HashCalc
 end;
 
-function TInnerProcessList.InnerGetProcessPath(AProcessHandle: THandle): String;
+function TProcessList.InnerGetProcessPath(AProcessHandle: THandle): String;
  var
   LIndex: NativeInt;
 begin
@@ -435,6 +464,14 @@ begin
     for LIndex := Low(FDevices) to High(FDevices) do
       if AnsiStartsText(FDevices[LIndex].DevicePath,Result) then
         Exit(FDevices[LIndex].DrivePath + Copy(Result,Length(FDevices[LIndex].DevicePath) + 1,Length(Result)))
+end;
+
+procedure RecProcessEntry.HashCalc;
+ var
+   LStr: String;
+begin
+  LStr := ProcessID.ToString + NativeInt(ProcessBits).ToString + ProcessName + ProcessPath + NativeInt(LimitedAccess).ToString;
+  Hash := LStr.GetHashCode
 end;
 
 end.

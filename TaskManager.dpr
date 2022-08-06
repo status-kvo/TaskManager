@@ -10,7 +10,9 @@ uses
   Information in 'sources\Information.pas',
   WinFileInfo in 'sources\WinFileInfo.pas',
   AuxTypes in 'sources\AuxTypes.pas',
-  StrRect in 'sources\StrRect.pas';
+  StrRect in 'sources\StrRect.pas',
+  DataModule.Images in 'sources\DataModule.Images.pas' {ImagesDataModule: TDataModule},
+  DataModule.Styles in 'sources\DataModule.Styles.pas' {StylesDataModule: TDataModule};
 
 {$R *.res}
 
@@ -58,6 +60,8 @@ begin
 
   Application.Initialize;
   Application.MainFormOnTaskbar := True;
+  Application.CreateForm(TImagesDataModule, ImagesDataModule);
+  Application.CreateForm(TStylesDataModule, StylesDataModule);
   Application.CreateForm(TMainForm, MainForm);
   Application.Run;
 end.
